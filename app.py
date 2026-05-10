@@ -1,9 +1,4 @@
-import os
-import re
-import json
-import uuid
-import threading
-import yt_dlp
+import os, re, uuid, threading, yt_dlp
 from flask import Flask, render_template, request, jsonify, send_file
 from datetime import datetime
 
@@ -15,29 +10,38 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 jobs = {}
 jobs_lock = threading.Lock()
 
-def sanitize(name):
-    return re.sub(r'[\\/*?:"<>|]', "_", name)
+# ── KEY FIX: Use only tv_embedded + mweb clients (no bot check) ──
+def get_base_opts():
+    return {
+        "quiet"          : True,
+        "no_warnings"    : True,
+        "geo_bypass"     : True,
+        "socket_timeout" : 30,
+        "retries"        : 10,
+        "fragment_retries": 10,
+        # These clients bypass bot detection without cookies
+        "extractor_args" : {
+            "youtube": {
+                "player_client": ["tv_embedded", "mweb"],
+                "player_skip"  : ["webpage"],
+            }
+        },
+        "http_headers": {
+            "User-Agent"     : "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/6.0 TV Safari/538.1",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    }
 
-def make_progress_hook(job_id):
-    def hook(d):
-        with jobs_lock:
-            job = jobs.get(job_id, {})
-            if d["status"] == "downloading":
-                pct = d.get("_percent_str", "0%").strip().replace("%", "")
-                try:
-                    job["progress"] = float(pct)
-                except:
-                    job["progress"] = 0
-                job["speed"]  = d.get("_speed_str",  "").strip()
-                job["eta"]    = d.get("_eta_str",    "").strip()
-                job["status"] = "downloading"
-            elif d["status"] == "finished":
-                job["progress"] = 99
-                job["status"]   = "processing"
-            elif d["status"] == "error":
-                job["status"] = "error"
-                job["error"]  = "Download error"
-    return hook
+def safe_duration(d):
+    try:
+        d = int(d or 0)
+        return f"{d//3600:02d}:{(d%3600)//60:02d}:{d%60:02d}"
+    except:
+        return "00:00:00"
+
+def safe_int(v):
+    try: return int(float(v or 0))
+    except: return 0
 
 QUALITY_MAP = {
     "4k"   : "bestvideo[height<=2160]+bestaudio/best",
@@ -55,57 +59,37 @@ AUDIO_CODEC_MAP = {
     "wav":"wav","ogg":"vorbis","opus":"opus","m4a":"m4a",
 }
 
-# ── Anti-bot options ──────────────────────────────────────────────
-def get_base_opts():
-    return {
-        "quiet"       : True,
-        "no_warnings" : True,
-        "geo_bypass"  : True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["web", "android", "ios"],
-                "player_skip"  : ["webpage", "configs"],
-            }
-        },
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 12; Pixel 6) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Mobile Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-        "socket_timeout": 30,
-        "retries"       : 10,
-        "fragment_retries": 10,
-    }
+def make_progress_hook(job_id):
+    def hook(d):
+        with jobs_lock:
+            job = jobs.get(job_id, {})
+            if d["status"] == "downloading":
+                pct = d.get("_percent_str","0%").strip().replace("%","")
+                try: job["progress"] = float(pct)
+                except: job["progress"] = 0
+                job["speed"]  = d.get("_speed_str","").strip()
+                job["eta"]    = d.get("_eta_str","").strip()
+                job["status"] = "downloading"
+            elif d["status"] == "finished":
+                job["progress"] = 99
+                job["status"]   = "processing"
+            elif d["status"] == "error":
+                job["status"] = "error"
+                job["error"]  = "Download error"
+    return hook
 
-def safe_duration(duration):
-    try:
-        d = int(duration or 0)
-        return f"{d//3600:02d}:{(d%3600)//60:02d}:{d%60:02d}"
-    except:
-        return "00:00:00"
-
-def safe_int(val):
-    try:
-        return int(val or 0)
-    except:
-        return 0
-
-# ── Background worker ─────────────────────────────────────────────
-def run_download(job_id, url, mode, quality, audio_fmt, audio_quality,
-                 subs, thumbnail, clip_start, clip_end):
+def run_download(job_id, url, mode, quality, audio_fmt,
+                 audio_quality, subs, thumbnail, clip_start, clip_end):
     job_dir = os.path.join(DOWNLOAD_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
     opts = {
         **get_base_opts(),
-        "outtmpl"    : os.path.join(job_dir, "%(title)s.%(ext)s"),
-        "progress_hooks": [make_progress_hook(job_id)],
+        "outtmpl"        : os.path.join(job_dir, "%(title)s.%(ext)s"),
+        "progress_hooks" : [make_progress_hook(job_id)],
         "concurrent_fragment_downloads": 4,
-        "quiet"      : False,
-        "no_warnings": False,
+        "quiet"          : False,
+        "no_warnings"    : False,
     }
 
     try:
@@ -113,55 +97,54 @@ def run_download(job_id, url, mode, quality, audio_fmt, audio_quality,
             codec = AUDIO_CODEC_MAP.get(audio_fmt, "mp3")
             opts["format"] = "bestaudio/best"
             opts["postprocessors"] = [
-                {"key": "FFmpegExtractAudio", "preferredcodec": codec,
-                 "preferredquality": audio_quality or "320"},
-                {"key": "FFmpegMetadata", "add_metadata": True},
+                {"key":"FFmpegExtractAudio","preferredcodec":codec,
+                 "preferredquality":audio_quality or "320"},
+                {"key":"FFmpegMetadata","add_metadata":True},
             ]
         else:
-            fmt = QUALITY_MAP.get(quality, QUALITY_MAP["best"])
-            pps = [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}]
-            opts["format"]              = fmt
+            pps = [{"key":"FFmpegVideoConvertor","preferedformat":"mp4"}]
+            opts["format"]              = QUALITY_MAP.get(quality, QUALITY_MAP["best"])
             opts["merge_output_format"] = "mp4"
             opts["postprocessors"]      = pps
             if subs:
                 opts["writesubtitles"] = True
-                opts["subtitleslangs"] = ["en", "auto"]
+                opts["subtitleslangs"] = ["en","auto"]
                 opts["embedsubtitles"] = True
-                pps.append({"key": "FFmpegEmbedSubtitle"})
+                pps.append({"key":"FFmpegEmbedSubtitle"})
             if thumbnail:
                 opts["writethumbnail"] = True
                 opts["embedthumbnail"] = True
-                pps.append({"key": "EmbedThumbnail"})
+                pps.append({"key":"EmbedThumbnail"})
             if clip_start and clip_end:
                 def _ts(t):
-                    parts = list(map(int, t.split(":")))
-                    if len(parts)==3: return parts[0]*3600+parts[1]*60+parts[2]
-                    if len(parts)==2: return parts[0]*60+parts[1]
-                    return int(parts[0])
+                    p = list(map(int, t.split(":")))
+                    if len(p)==3: return p[0]*3600+p[1]*60+p[2]
+                    if len(p)==2: return p[0]*60+p[1]
+                    return int(p[0])
                 opts["download_ranges"]         = lambda *_: [{"start_time":_ts(clip_start),"end_time":_ts(clip_end)}]
                 opts["force_keyframes_at_cuts"] = True
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
-        files = [f for f in os.listdir(job_dir) if os.path.isfile(os.path.join(job_dir, f))]
+        files = [f for f in os.listdir(job_dir)
+                 if os.path.isfile(os.path.join(job_dir, f))]
         if not files:
             raise Exception("No output file found.")
-        files.sort(key=lambda f: os.path.getmtime(os.path.join(job_dir, f)), reverse=True)
-        filename = files[0]
+        files.sort(key=lambda f: os.path.getmtime(os.path.join(job_dir,f)), reverse=True)
 
         with jobs_lock:
-            jobs[job_id]["status"]   = "done"
-            jobs[job_id]["progress"] = 100
-            jobs[job_id]["filename"] = filename
-            jobs[job_id]["filepath"] = os.path.join(job_dir, filename)
-
+            jobs[job_id].update({
+                "status"  : "done",
+                "progress": 100,
+                "filename": files[0],
+                "filepath": os.path.join(job_dir, files[0]),
+            })
     except Exception as e:
         with jobs_lock:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"]  = str(e)
 
-# ── Routes ────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -169,11 +152,9 @@ def index():
 @app.route("/api/info", methods=["POST"])
 def get_info():
     url = request.json.get("url","").strip()
-    if not url:
-        return jsonify({"error":"No URL provided"}), 400
+    if not url: return jsonify({"error":"No URL"}), 400
     try:
-        opts = {**get_base_opts(), "quiet":True}
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(get_base_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
         return jsonify({
             "title"      : info.get("title","Unknown"),
@@ -186,16 +167,14 @@ def get_info():
             "is_live"    : bool(info.get("is_live",False)),
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error":str(e)}), 400
 
 @app.route("/api/formats", methods=["POST"])
 def get_formats():
     url = request.json.get("url","").strip()
-    if not url:
-        return jsonify({"error":"No URL"}), 400
+    if not url: return jsonify({"error":"No URL"}), 400
     try:
-        opts = {**get_base_opts()}
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(get_base_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
         fmts = []
         for f in info.get("formats",[]):
@@ -210,28 +189,23 @@ def get_formats():
                 "vcodec": str(f.get("vcodec","?")),
                 "acodec": str(f.get("acodec","?")),
             })
-        return jsonify({"formats": fmts})
+        return jsonify({"formats":fmts})
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error":str(e)}), 400
 
 @app.route("/api/search", methods=["POST"])
 def search():
     query = request.json.get("query","").strip()
     count = request.json.get("count", 6)
-    if not query:
-        return jsonify({"error":"No query"}), 400
+    if not query: return jsonify({"error":"No query"}), 400
     try:
         opts = {**get_base_opts(), "extract_flat":True}
         with yt_dlp.YoutubeDL(opts) as ydl:
             results = ydl.extract_info(f"ytsearch{count}:{query}", download=False)
         entries = []
         for e in results.get("entries",[]):
-            # Fix: safely convert duration to int first
-            dur = 0
-            try:
-                dur = int(float(e.get("duration") or 0))
-            except:
-                dur = 0
+            try: dur = int(float(e.get("duration") or 0))
+            except: dur = 0
             entries.append({
                 "id"       : str(e.get("id","")),
                 "title"    : str(e.get("title","?")),
@@ -240,57 +214,51 @@ def search():
                 "thumbnail": str(e.get("thumbnail","")),
                 "url"      : f"https://www.youtube.com/watch?v={e.get('id','')}",
             })
-        return jsonify({"results": entries})
+        return jsonify({"results":entries})
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error":str(e)}), 400
 
 @app.route("/api/download", methods=["POST"])
 def start_download():
-    data          = request.json
-    url           = data.get("url","").strip()
-    mode          = data.get("mode","video")
-    quality       = data.get("quality","best")
-    audio_fmt     = data.get("audio_fmt","mp3")
-    audio_quality = data.get("audio_quality","320")
-    subs          = data.get("subs", False)
-    thumbnail     = data.get("thumbnail", False)
-    clip_start    = data.get("clip_start","").strip()
-    clip_end      = data.get("clip_end","").strip()
-
-    if not url:
-        return jsonify({"error":"No URL"}), 400
-
+    data = request.json
+    url  = data.get("url","").strip()
+    if not url: return jsonify({"error":"No URL"}), 400
     job_id = str(uuid.uuid4())
     with jobs_lock:
-        jobs[job_id] = {"status":"queued","progress":0,"speed":"","eta":"","filename":"","error":""}
-
-    t = threading.Thread(
+        jobs[job_id] = {"status":"queued","progress":0,
+                        "speed":"","eta":"","filename":"","error":""}
+    threading.Thread(
         target=run_download,
-        args=(job_id, url, mode, quality, audio_fmt, audio_quality,
-              subs, thumbnail, clip_start, clip_end),
+        args=(job_id, url,
+              data.get("mode","video"),
+              data.get("quality","best"),
+              data.get("audio_fmt","mp3"),
+              data.get("audio_quality","320"),
+              data.get("subs",False),
+              data.get("thumbnail",False),
+              data.get("clip_start","").strip(),
+              data.get("clip_end","").strip()),
         daemon=True,
-    )
-    t.start()
-    return jsonify({"job_id": job_id})
+    ).start()
+    return jsonify({"job_id":job_id})
 
 @app.route("/api/status/<job_id>")
 def job_status(job_id):
     with jobs_lock:
         job = jobs.get(job_id)
-    if not job:
-        return jsonify({"error":"Job not found"}), 404
+    if not job: return jsonify({"error":"Job not found"}), 404
     return jsonify(job)
 
 @app.route("/api/file/<job_id>")
 def serve_file(job_id):
     with jobs_lock:
-        job = jobs.get(job_id, {})
+        job = jobs.get(job_id,{})
     if job.get("status") != "done":
         return jsonify({"error":"Not ready"}), 400
-    filepath = job.get("filepath","")
-    if not filepath or not os.path.exists(filepath):
+    fp = job.get("filepath","")
+    if not fp or not os.path.exists(fp):
         return jsonify({"error":"File not found"}), 404
-    return send_file(filepath, as_attachment=True, download_name=job["filename"])
+    return send_file(fp, as_attachment=True, download_name=job["filename"])
 
 @app.route("/health")
 def health():
