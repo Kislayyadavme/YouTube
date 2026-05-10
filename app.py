@@ -1,4 +1,4 @@
-import os, re, uuid, threading, yt_dlp
+import os, re, uuid, threading, requests
 from flask import Flask, render_template, request, jsonify, send_file
 from datetime import datetime
 
@@ -7,144 +7,90 @@ app = Flask(__name__)
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/tmp/ytdl_downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# ── Your Cloudflare Worker URL ────────────────────────────────────
+WORKER_URL = "https://alpha.kislayyadav02.workers.dev"
+
 jobs = {}
 jobs_lock = threading.Lock()
 
-# ── KEY FIX: Use only tv_embedded + mweb clients (no bot check) ──
-def get_base_opts():
-    return {
-        "quiet"          : True,
-        "no_warnings"    : True,
-        "geo_bypass"     : True,
-        "socket_timeout" : 30,
-        "retries"        : 10,
-        "fragment_retries": 10,
-        # These clients bypass bot detection without cookies
-        "extractor_args" : {
-            "youtube": {
-                "player_client": ["tv_embedded", "mweb"],
-                "player_skip"  : ["webpage"],
-            }
-        },
-        "http_headers": {
-            "User-Agent"     : "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/6.0 TV Safari/538.1",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-    }
-
-def safe_duration(d):
+def worker_get(path, params={}):
     try:
-        d = int(d or 0)
-        return f"{d//3600:02d}:{(d%3600)//60:02d}:{d%60:02d}"
-    except:
-        return "00:00:00"
+        r = requests.get(f"{WORKER_URL}{path}", params=params, timeout=30)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
 
-def safe_int(v):
-    try: return int(float(v or 0))
-    except: return 0
-
-QUALITY_MAP = {
-    "4k"   : "bestvideo[height<=2160]+bestaudio/best",
-    "2k"   : "bestvideo[height<=1440]+bestaudio/best",
-    "1080p": "bestvideo[height<=1080]+bestaudio/best",
-    "720p" : "bestvideo[height<=720]+bestaudio/best",
-    "480p" : "bestvideo[height<=480]+bestaudio/best",
-    "360p" : "bestvideo[height<=360]+bestaudio/best",
-    "144p" : "bestvideo[height<=144]+bestaudio/best",
-    "best" : "bestvideo+bestaudio/best",
-}
-
-AUDIO_CODEC_MAP = {
-    "mp3":"mp3","aac":"aac","flac":"flac",
-    "wav":"wav","ogg":"vorbis","opus":"opus","m4a":"m4a",
-}
-
-def make_progress_hook(job_id):
-    def hook(d):
-        with jobs_lock:
-            job = jobs.get(job_id, {})
-            if d["status"] == "downloading":
-                pct = d.get("_percent_str","0%").strip().replace("%","")
-                try: job["progress"] = float(pct)
-                except: job["progress"] = 0
-                job["speed"]  = d.get("_speed_str","").strip()
-                job["eta"]    = d.get("_eta_str","").strip()
-                job["status"] = "downloading"
-            elif d["status"] == "finished":
-                job["progress"] = 99
-                job["status"]   = "processing"
-            elif d["status"] == "error":
-                job["status"] = "error"
-                job["error"]  = "Download error"
-    return hook
-
-def run_download(job_id, url, mode, quality, audio_fmt,
-                 audio_quality, subs, thumbnail, clip_start, clip_end):
+def run_download(job_id, stream_url, audio_url, filename, video_only):
     job_dir = os.path.join(DOWNLOAD_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
+    filepath = os.path.join(job_dir, filename)
 
-    opts = {
-        **get_base_opts(),
-        "outtmpl"        : os.path.join(job_dir, "%(title)s.%(ext)s"),
-        "progress_hooks" : [make_progress_hook(job_id)],
-        "concurrent_fragment_downloads": 4,
-        "quiet"          : False,
-        "no_warnings"    : False,
-    }
+    with jobs_lock:
+        jobs[job_id]["status"] = "downloading"
 
     try:
-        if mode == "audio":
-            codec = AUDIO_CODEC_MAP.get(audio_fmt, "mp3")
-            opts["format"] = "bestaudio/best"
-            opts["postprocessors"] = [
-                {"key":"FFmpegExtractAudio","preferredcodec":codec,
-                 "preferredquality":audio_quality or "320"},
-                {"key":"FFmpegMetadata","add_metadata":True},
-            ]
+        if video_only and audio_url:
+            # Download video + audio separately then merge with ffmpeg
+            v_path = filepath + ".video.tmp"
+            a_path = filepath + ".audio.tmp"
+
+            for url, path, label in [(stream_url, v_path, "video"), (audio_url, a_path, "audio")]:
+                with jobs_lock:
+                    jobs[job_id]["status"] = f"downloading {label}"
+                with requests.get(url, stream=True, timeout=60,
+                    headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.youtube.com/"}) as r:
+                    r.raise_for_status()
+                    total = int(r.headers.get("content-length", 0))
+                    downloaded = 0
+                    with open(path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=1024*1024):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total:
+                                    with jobs_lock:
+                                        jobs[job_id]["progress"] = round((downloaded/total)*50 if label=="video" else 50+round((downloaded/total)*45), 1)
+
+            # Merge with ffmpeg
+            with jobs_lock:
+                jobs[job_id]["status"] = "processing"
+                jobs[job_id]["progress"] = 95
+            ret = os.system(f'ffmpeg -y -i "{v_path}" -i "{a_path}" -c copy "{filepath}" -loglevel quiet')
+            os.remove(v_path)
+            os.remove(a_path)
+            if ret != 0:
+                raise Exception("ffmpeg merge failed")
+
         else:
-            pps = [{"key":"FFmpegVideoConvertor","preferedformat":"mp4"}]
-            opts["format"]              = QUALITY_MAP.get(quality, QUALITY_MAP["best"])
-            opts["merge_output_format"] = "mp4"
-            opts["postprocessors"]      = pps
-            if subs:
-                opts["writesubtitles"] = True
-                opts["subtitleslangs"] = ["en","auto"]
-                opts["embedsubtitles"] = True
-                pps.append({"key":"FFmpegEmbedSubtitle"})
-            if thumbnail:
-                opts["writethumbnail"] = True
-                opts["embedthumbnail"] = True
-                pps.append({"key":"EmbedThumbnail"})
-            if clip_start and clip_end:
-                def _ts(t):
-                    p = list(map(int, t.split(":")))
-                    if len(p)==3: return p[0]*3600+p[1]*60+p[2]
-                    if len(p)==2: return p[0]*60+p[1]
-                    return int(p[0])
-                opts["download_ranges"]         = lambda *_: [{"start_time":_ts(clip_start),"end_time":_ts(clip_end)}]
-                opts["force_keyframes_at_cuts"] = True
-
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
-
-        files = [f for f in os.listdir(job_dir)
-                 if os.path.isfile(os.path.join(job_dir, f))]
-        if not files:
-            raise Exception("No output file found.")
-        files.sort(key=lambda f: os.path.getmtime(os.path.join(job_dir,f)), reverse=True)
+            # Direct stream download
+            with requests.get(stream_url, stream=True, timeout=60,
+                headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.youtube.com/"}) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                with open(filepath, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024*1024):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total:
+                                with jobs_lock:
+                                    jobs[job_id]["progress"] = round((downloaded/total)*99, 1)
 
         with jobs_lock:
             jobs[job_id].update({
                 "status"  : "done",
                 "progress": 100,
-                "filename": files[0],
-                "filepath": os.path.join(job_dir, files[0]),
+                "filename": filename,
+                "filepath": filepath,
             })
+
     except Exception as e:
         with jobs_lock:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"]  = str(e)
 
+# ── Routes ────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -153,94 +99,81 @@ def index():
 def get_info():
     url = request.json.get("url","").strip()
     if not url: return jsonify({"error":"No URL"}), 400
-    try:
-        with yt_dlp.YoutubeDL(get_base_opts()) as ydl:
-            info = ydl.extract_info(url, download=False)
-        return jsonify({
-            "title"      : info.get("title","Unknown"),
-            "channel"    : info.get("uploader","Unknown"),
-            "thumbnail"  : info.get("thumbnail",""),
-            "duration"   : safe_duration(info.get("duration",0)),
-            "views"      : f"{safe_int(info.get('view_count',0)):,}",
-            "likes"      : f"{safe_int(info.get('like_count',0)):,}",
-            "upload_date": str(info.get("upload_date","")),
-            "is_live"    : bool(info.get("is_live",False)),
-        })
-    except Exception as e:
-        return jsonify({"error":str(e)}), 400
+    data = worker_get("/info", {"url": url})
+    if data.get("error"): return jsonify({"error": data["error"]}), 400
+    return jsonify(data)
 
 @app.route("/api/formats", methods=["POST"])
 def get_formats():
     url = request.json.get("url","").strip()
     if not url: return jsonify({"error":"No URL"}), 400
-    try:
-        with yt_dlp.YoutubeDL(get_base_opts()) as ydl:
-            info = ydl.extract_info(url, download=False)
-        fmts = []
-        for f in info.get("formats",[]):
-            size = f.get("filesize") or f.get("filesize_approx")
-            fmts.append({
-                "id"    : str(f.get("format_id","?")),
-                "ext"   : str(f.get("ext","?")),
-                "res"   : str(f.get("resolution") or f"{f.get('width','?')}x{f.get('height','?')}"),
-                "fps"   : str(f.get("fps","?")),
-                "size"  : f"{size/1024/1024:.1f}MB" if size else "N/A",
-                "note"  : str(f.get("format_note","")),
-                "vcodec": str(f.get("vcodec","?")),
-                "acodec": str(f.get("acodec","?")),
-            })
-        return jsonify({"formats":fmts})
-    except Exception as e:
-        return jsonify({"error":str(e)}), 400
+    data = worker_get("/formats", {"url": url})
+    if data.get("error"): return jsonify({"error": data["error"]}), 400
+    # Flatten for table display
+    fmts = []
+    for v in data.get("formats",{}).get("video",[]):
+        fmts.append({**v, "type":"video"})
+    for a in data.get("formats",{}).get("audio",[]):
+        fmts.append({**a, "type":"audio"})
+    return jsonify({"formats": fmts})
 
 @app.route("/api/search", methods=["POST"])
 def search():
     query = request.json.get("query","").strip()
     count = request.json.get("count", 6)
     if not query: return jsonify({"error":"No query"}), 400
-    try:
-        opts = {**get_base_opts(), "extract_flat":True}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            results = ydl.extract_info(f"ytsearch{count}:{query}", download=False)
-        entries = []
-        for e in results.get("entries",[]):
-            try: dur = int(float(e.get("duration") or 0))
-            except: dur = 0
-            entries.append({
-                "id"       : str(e.get("id","")),
-                "title"    : str(e.get("title","?")),
-                "channel"  : str(e.get("uploader") or e.get("channel") or "?"),
-                "duration" : f"{dur//60}:{dur%60:02d}",
-                "thumbnail": str(e.get("thumbnail","")),
-                "url"      : f"https://www.youtube.com/watch?v={e.get('id','')}",
-            })
-        return jsonify({"results":entries})
-    except Exception as e:
-        return jsonify({"error":str(e)}), 400
+    data = worker_get("/search", {"q": query, "limit": count})
+    if data.get("error"): return jsonify({"error": data["error"]}), 400
+    return jsonify({"results": data.get("results", [])})
 
 @app.route("/api/download", methods=["POST"])
 def start_download():
-    data = request.json
-    url  = data.get("url","").strip()
+    body      = request.json
+    url       = body.get("url","").strip()
+    mode      = body.get("mode","video")
+    quality   = body.get("quality","720p")
+    audio_fmt = body.get("audio_fmt","mp3")
+
     if not url: return jsonify({"error":"No URL"}), 400
+
+    # Get stream info from Worker
+    if mode == "audio":
+        data = worker_get("/audio", {"url": url})
+    else:
+        data = worker_get("/download", {"url": url, "quality": quality, "type": "video"})
+
+    if not data.get("success"):
+        return jsonify({"error": data.get("error","Failed to get stream info")}), 400
+
+    stream_url = data.get("stream_url") or data.get("download_url")
+    audio_url  = data.get("audio_url")
+    video_only = data.get("video_only", False)
+    filename   = data.get("filename", f"video_{uuid.uuid4().hex[:8]}.mp4")
+
+    # Clean filename
+    filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+
+    if not stream_url:
+        return jsonify({"error":"No stream URL returned"}), 400
+
     job_id = str(uuid.uuid4())
     with jobs_lock:
-        jobs[job_id] = {"status":"queued","progress":0,
-                        "speed":"","eta":"","filename":"","error":""}
+        jobs[job_id] = {
+            "status"  : "queued",
+            "progress": 0,
+            "speed"   : "",
+            "eta"     : "",
+            "filename": filename,
+            "error"   : "",
+        }
+
     threading.Thread(
         target=run_download,
-        args=(job_id, url,
-              data.get("mode","video"),
-              data.get("quality","best"),
-              data.get("audio_fmt","mp3"),
-              data.get("audio_quality","320"),
-              data.get("subs",False),
-              data.get("thumbnail",False),
-              data.get("clip_start","").strip(),
-              data.get("clip_end","").strip()),
+        args=(job_id, stream_url, audio_url, filename, video_only),
         daemon=True,
     ).start()
-    return jsonify({"job_id":job_id})
+
+    return jsonify({"job_id": job_id})
 
 @app.route("/api/status/<job_id>")
 def job_status(job_id):
@@ -252,7 +185,7 @@ def job_status(job_id):
 @app.route("/api/file/<job_id>")
 def serve_file(job_id):
     with jobs_lock:
-        job = jobs.get(job_id,{})
+        job = jobs.get(job_id, {})
     if job.get("status") != "done":
         return jsonify({"error":"Not ready"}), 400
     fp = job.get("filepath","")
