@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>YT Downloader Pro</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0f;--surface:#12121a;--card:#1a1a26;--border:#2a2a3d;
+  --accent:#ff3c6e;--accent2:#ff8c42;--text:#e8e8f0;--muted:#6b6b85;
+  --green:#00e5a0;--blue:#4d9fff;
+}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh;overflow-x:hidden}
+
+/* Animated background */
+body::before{
+  content:'';position:fixed;inset:0;z-index:0;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% -10%,rgba(255,60,110,.12) 0%,transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 110%,rgba(77,159,255,.1) 0%,transparent 60%);
+  pointer-events:none;
+}
+
+.wrap{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:2rem 1.5rem 4rem}
+
+/* Header */
+header{text-align:center;padding:3rem 0 2rem}
+header h1{font-size:clamp(2rem,5vw,3.5rem);font-weight:800;letter-spacing:-.03em;
+  background:linear-gradient(135deg,#ff3c6e,#ff8c42);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+header p{color:var(--muted);font-size:.95rem;margin-top:.5rem;font-family:'DM Mono',monospace}
+
+/* Tabs */
+.tabs{display:flex;gap:.5rem;background:var(--surface);border-radius:14px;padding:.4rem;border:1px solid var(--border);margin-bottom:1.5rem}
+.tab{flex:1;padding:.6rem;border:none;background:none;color:var(--muted);font-family:'Syne',sans-serif;font-weight:600;font-size:.85rem;cursor:pointer;border-radius:10px;transition:all .2s}
+.tab.active{background:var(--accent);color:#fff}
+.tab:hover:not(.active){color:var(--text);background:var(--border)}
+
+/* Card */
+.card{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:1.5rem;margin-bottom:1.25rem}
+
+/* Input */
+.url-row{display:flex;gap:.75rem;align-items:stretch}
+.url-input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:.85rem 1.1rem;color:var(--text);font-family:'DM Mono',monospace;font-size:.9rem;outline:none;transition:border .2s}
+.url-input:focus{border-color:var(--accent)}
+.url-input::placeholder{color:var(--muted)}
+.btn{padding:.85rem 1.5rem;border:none;border-radius:12px;font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;cursor:pointer;transition:all .2s;white-space:nowrap}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 24px rgba(255,60,110,.35)}
+.btn-ghost{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
+.btn-green{background:var(--green);color:#000}
+.btn-green:hover{transform:translateY(-1px);box-shadow:0 6px 24px rgba(0,229,160,.3)}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
+
+/* Video info preview */
+.info-card{display:flex;gap:1rem;align-items:flex-start;animation:fadeIn .4s ease}
+.info-thumb{width:140px;min-width:140px;aspect-ratio:16/9;object-fit:cover;border-radius:10px;border:1px solid var(--border)}
+.info-meta h3{font-size:1rem;font-weight:700;line-height:1.4;margin-bottom:.5rem}
+.meta-row{display:flex;flex-wrap:wrap;gap:.5rem .9rem;font-size:.8rem;color:var(--muted);font-family:'DM Mono',monospace}
+.badge{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.2rem .5rem;font-size:.75rem}
+.badge.live{background:rgba(255,60,110,.15);border-color:var(--accent);color:var(--accent)}
+
+/* Options grid */
+.options-grid{display:grid;grid-template-columns:1fr 1fr;gap:.9rem}
+@media(max-width:600px){.options-grid{grid-template-columns:1fr}}
+.opt-group label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-bottom:.4rem;text-transform:uppercase;letter-spacing:.06em}
+select{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.75rem 1rem;color:var(--text);font-family:'Syne',sans-serif;font-size:.875rem;outline:none;cursor:pointer;transition:border .2s;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%236b6b85' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 1rem center}
+select:focus{border-color:var(--accent)}
+
+/* Toggle switches */
+.toggles{display:flex;flex-wrap:wrap;gap:.75rem;margin-top:.25rem}
+.toggle-item{display:flex;align-items:center;gap:.5rem;cursor:pointer}
+.toggle-item input[type=checkbox]{display:none}
+.toggle-track{width:38px;height:22px;background:var(--border);border-radius:999px;position:relative;transition:background .2s}
+.toggle-item input:checked+.toggle-track{background:var(--accent)}
+.toggle-track::after{content:'';position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s}
+.toggle-item input:checked+.toggle-track::after{transform:translateX(16px)}
+.toggle-label{font-size:.85rem;color:var(--text)}
+
+/* Clip row */
+.clip-row{display:grid;grid-template-columns:1fr 1fr;gap:.9rem}
+.clip-row input{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.75rem 1rem;color:var(--text);font-family:'DM Mono',monospace;font-size:.875rem;outline:none;transition:border .2s}
+.clip-row input:focus{border-color:var(--accent)}
+.clip-row input::placeholder{color:var(--muted)}
+
+/* Progress */
+.progress-wrap{margin-top:1rem}
+.progress-info{display:flex;justify-content:space-between;font-size:.8rem;font-family:'DM Mono',monospace;color:var(--muted);margin-bottom:.5rem}
+.progress-bar-bg{height:8px;background:var(--border);border-radius:999px;overflow:hidden}
+.progress-bar{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:999px;transition:width .4s ease;width:0%}
+.status-text{font-size:.82rem;color:var(--muted);font-family:'DM Mono',monospace;margin-top:.4rem}
+
+/* Download button row */
+.dl-row{display:flex;gap:.75rem;margin-top:1rem;align-items:center}
+
+/* Formats table */
+.formats-wrap{overflow-x:auto;margin-top:1rem}
+table{width:100%;border-collapse:collapse;font-size:.8rem;font-family:'DM Mono',monospace}
+th{text-align:left;padding:.5rem .75rem;color:var(--muted);border-bottom:1px solid var(--border);text-transform:uppercase;font-size:.7rem;letter-spacing:.06em}
+td{padding:.55rem .75rem;border-bottom:1px solid rgba(255,255,255,.04);color:var(--text)}
+tr:hover td{background:rgba(255,255,255,.03)}
+
+/* Search results */
+.search-input-row{display:flex;gap:.75rem}
+.search-results{display:grid;gap:.75rem;margin-top:1rem}
+.search-item{display:flex;gap:1rem;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:.85rem;cursor:pointer;transition:all .2s}
+.search-item:hover{border-color:var(--accent);transform:translateY(-1px)}
+.search-thumb{width:100px;min-width:100px;aspect-ratio:16/9;object-fit:cover;border-radius:7px}
+.search-meta{flex:1;min-width:0}
+.search-meta h4{font-size:.9rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.search-meta p{font-size:.78rem;color:var(--muted);margin-top:.25rem;font-family:'DM Mono',monospace}
+.search-use{background:var(--accent);color:#fff;border:none;padding:.4rem .9rem;border-radius:8px;font-family:'Syne',sans-serif;font-weight:700;font-size:.8rem;cursor:pointer;white-space:nowrap;flex-shrink:0}
+
+/* Panels */
+.panel{display:none}
+.panel.active{display:block}
+
+/* Alerts */
+.alert{padding:.85rem 1rem;border-radius:10px;font-size:.85rem;font-family:'DM Mono',monospace;margin-bottom:1rem}
+.alert-err{background:rgba(255,60,110,.1);border:1px solid rgba(255,60,110,.35);color:#ff7096}
+.alert-ok{background:rgba(0,229,160,.1);border:1px solid rgba(0,229,160,.35);color:var(--green)}
+
+/* Loading spinner */
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:.4rem}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* Responsive */
+@media(max-width:560px){
+  .url-row{flex-direction:column}
+  .info-card{flex-direction:column}
+  .info-thumb{width:100%}
+  .dl-row{flex-direction:column}
+  .search-item{flex-direction:column;align-items:flex-start}
+  .search-thumb{width:100%}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>⚡ YT Downloader Pro</h1>
+    <p>Download videos, audio, playlists & more — free & fast</p>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('download')">📥 Download</button>
+    <button class="tab" onclick="switchTab('search')">🔍 Search</button>
+    <button class="tab" onclick="switchTab('formats')">📊 Formats</button>
+  </div>
+
+  <!-- ── DOWNLOAD PANEL ── -->
+  <div id="panel-download" class="panel active">
+
+    <div class="card">
+      <div class="url-row">
+        <input id="main-url" class="url-input" type="text" placeholder="Paste YouTube URL here…" oninput="onUrlChange()"/>
+        <button class="btn btn-primary" onclick="fetchInfo()">Fetch Info</button>
+      </div>
+      <div id="info-alert"></div>
+      <div id="video-info" style="margin-top:1rem;display:none"></div>
+    </div>
+
+    <div class="card" id="options-card" style="display:none">
+      <div class="tabs" style="margin-bottom:1rem">
+        <button class="tab active" id="mode-video" onclick="setMode('video')">🎬 Video</button>
+        <button class="tab" id="mode-audio" onclick="setMode('audio')">🎵 Audio</button>
+        <button class="tab" id="mode-clip" onclick="setMode('clip')">✂️ Clip</button>
+      </div>
+
+      <!-- VIDEO OPTIONS -->
+      <div id="opt-video">
+        <div class="options-grid">
+          <div class="opt-group">
+            <label>Quality</label>
+            <select id="sel-quality">
+              <option value="best">Best Available (Auto)</option>
+              <option value="4k">4K Ultra HD (2160p)</option>
+              <option value="2k">2K Quad HD (1440p)</option>
+              <option value="1080p">Full HD (1080p)</option>
+              <option value="720p" selected>HD (720p)</option>
+              <option value="480p">SD (480p)</option>
+              <option value="360p">Low (360p)</option>
+              <option value="144p">Lowest (144p)</option>
+            </select>
+          </div>
+          <div class="opt-group">
+            <label>Options</label>
+            <div class="toggles">
+              <label class="toggle-item"><input type="checkbox" id="chk-subs"/><span class="toggle-track"></span><span class="toggle-label">Subtitles</span></label>
+              <label class="toggle-item"><input type="checkbox" id="chk-thumb"/><span class="toggle-track"></span><span class="toggle-label">Thumbnail</span></label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AUDIO OPTIONS -->
+      <div id="opt-audio" style="display:none">
+        <div class="options-grid">
+          <div class="opt-group">
+            <label>Format</label>
+            <select id="sel-afmt">
+              <option value="mp3">MP3 (Universal)</option>
+              <option value="aac">AAC (Apple)</option>
+              <option value="flac">FLAC (Lossless)</option>
+              <option value="wav">WAV (Uncompressed)</option>
+              <option value="ogg">OGG (Open Source)</option>
+              <option value="opus">OPUS (Best Compression)</option>
+              <option value="m4a">M4A (iTunes)</option>
+            </select>
+          </div>
+          <div class="opt-group">
+            <label>Bitrate</label>
+            <select id="sel-abitrate">
+              <option value="320">320 kbps (Best)</option>
+              <option value="256">256 kbps</option>
+              <option value="192">192 kbps</option>
+              <option value="128">128 kbps</option>
+              <option value="96">96 kbps</option>
+              <option value="64">64 kbps (Lowest)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- CLIP OPTIONS -->
+      <div id="opt-clip" style="display:none">
+        <div class="options-grid" style="margin-bottom:.9rem">
+          <div class="opt-group">
+            <label>Quality</label>
+            <select id="sel-clip-quality">
+              <option value="best">Best Available</option>
+              <option value="1080p">Full HD (1080p)</option>
+              <option value="720p" selected>HD (720p)</option>
+              <option value="480p">SD (480p)</option>
+              <option value="360p">Low (360p)</option>
+            </select>
+          </div>
+          <div class="opt-group">
+            <label>Time Range (HH:MM:SS)</label>
+            <div class="clip-row">
+              <input id="clip-start" type="text" placeholder="00:01:00"/>
+              <input id="clip-end"   type="text" placeholder="00:02:30"/>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="dl-progress" style="display:none">
+        <div class="progress-wrap">
+          <div class="progress-info">
+            <span id="prog-pct">0%</span>
+            <span id="prog-speed"></span>
+            <span id="prog-eta"></span>
+          </div>
+          <div class="progress-bar-bg"><div class="progress-bar" id="prog-bar"></div></div>
+          <div class="status-text" id="status-text">Starting…</div>
+        </div>
+      </div>
+
+      <div id="dl-error" style="display:none" class="alert alert-err"></div>
+
+      <div class="dl-row">
+        <button class="btn btn-primary" id="btn-start" onclick="startDownload()">⬇️ Start Download</button>
+        <button class="btn btn-green" id="btn-save" style="display:none" onclick="saveFile()">💾 Save File</button>
+        <span id="dl-filename" style="font-size:.8rem;color:var(--muted);font-family:'DM Mono',monospace"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SEARCH PANEL ── -->
+  <div id="panel-search" class="panel">
+    <div class="card">
+      <div class="search-input-row">
+        <input id="search-q" class="url-input" type="text" placeholder="Search YouTube…" onkeydown="if(event.key==='Enter')doSearch()"/>
+        <select id="search-count" style="width:auto;min-width:90px">
+          <option value="5">5</option>
+          <option value="10">10</option>
+          <option value="15">15</option>
+        </select>
+        <button class="btn btn-primary" onclick="doSearch()">Search</button>
+      </div>
+    </div>
+    <div id="search-results"></div>
+  </div>
+
+  <!-- ── FORMATS PANEL ── -->
+  <div id="panel-formats" class="panel">
+    <div class="card">
+      <div class="url-row">
+        <input id="fmt-url" class="url-input" type="text" placeholder="Paste YouTube URL to list all formats…"/>
+        <button class="btn btn-primary" onclick="fetchFormats()">List Formats</button>
+      </div>
+    </div>
+    <div id="formats-result"></div>
+  </div>
+
+</div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────
+let currentMode = 'video';
+let pollTimer   = null;
+let currentJob  = null;
+let videoReady  = false;
+
+// ─── Tab switching ────────────────────────────────────────────────
+function switchTab(name){
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('panel-'+name).classList.add('active');
+  event.currentTarget.classList.add('active');
+}
+
+// ─── Mode (video/audio/clip) ──────────────────────────────────────
+function setMode(m){
+  currentMode = m;
+  ['video','audio','clip'].forEach(x=>{
+    document.getElementById('opt-'+x).style.display = x===m?'block':'none';
+    document.getElementById('mode-'+x).classList.toggle('active', x===m);
+  });
+}
+
+// ─── URL changed → reset ─────────────────────────────────────────
+function onUrlChange(){
+  videoReady = false;
+  document.getElementById('video-info').style.display   = 'none';
+  document.getElementById('options-card').style.display = 'none';
+  document.getElementById('info-alert').innerHTML        = '';
+  resetProgress();
+}
+
+// ─── Fetch video info ─────────────────────────────────────────────
+async function fetchInfo(){
+  const url = document.getElementById('main-url').value.trim();
+  if(!url){ showAlert('info-alert','Please enter a YouTube URL','err'); return; }
+  showAlert('info-alert','<span class="spinner"></span> Fetching info…','ok');
+  document.getElementById('video-info').style.display   = 'none';
+  document.getElementById('options-card').style.display = 'none';
+  try{
+    const r  = await fetch('/api/info',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    const d  = await r.json();
+    if(d.error){ showAlert('info-alert',d.error,'err'); return; }
+    document.getElementById('info-alert').innerHTML = '';
+    document.getElementById('video-info').innerHTML = `
+      <div class="info-card">
+        <img class="info-thumb" src="${d.thumbnail}" onerror="this.style.display='none'"/>
+        <div class="info-meta">
+          <h3>${esc(d.title)}</h3>
+          <div class="meta-row">
+            <span>👤 ${esc(d.channel)}</span>
+            <span>⏱ ${d.duration}</span>
+            <span>👁 ${d.views} views</span>
+            <span>👍 ${d.likes}</span>
+            <span>📅 ${d.upload_date}</span>
+            ${d.is_live?'<span class="badge live">🔴 LIVE</span>':''}
+          </div>
+        </div>
+      </div>`;
+    document.getElementById('video-info').style.display   = 'block';
+    document.getElementById('options-card').style.display = 'block';
+    videoReady = true;
+    resetProgress();
+  }catch(e){ showAlert('info-alert','Network error: '+e.message,'err'); }
+}
+
+// ─── Start download ───────────────────────────────────────────────
+async function startDownload(){
+  const url = document.getElementById('main-url').value.trim();
+  if(!url||!videoReady){ showAlert('info-alert','Fetch video info first','err'); return; }
+
+  resetProgress();
+  document.getElementById('dl-progress').style.display = 'block';
+  document.getElementById('btn-start').disabled         = true;
+  document.getElementById('btn-save').style.display     = 'none';
+  document.getElementById('dl-filename').textContent    = '';
+  document.getElementById('dl-error').style.display     = 'none';
+
+  const payload = {
+    url,
+    mode          : currentMode === 'clip' ? 'video' : currentMode,
+    quality       : currentMode === 'clip'
+                      ? document.getElementById('sel-clip-quality').value
+                      : document.getElementById('sel-quality').value,
+    audio_fmt     : document.getElementById('sel-afmt').value,
+    audio_quality : document.getElementById('sel-abitrate').value,
+    subs          : document.getElementById('chk-subs').checked,
+    thumbnail     : document.getElementById('chk-thumb').checked,
+    clip_start    : currentMode==='clip' ? document.getElementById('clip-start').value.trim() : '',
+    clip_end      : currentMode==='clip' ? document.getElementById('clip-end').value.trim()   : '',
+  };
+
+  try{
+    const r = await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d = await r.json();
+    if(d.error){ showDlError(d.error); return; }
+    currentJob = d.job_id;
+    pollStatus();
+  }catch(e){ showDlError('Network error: '+e.message); }
+}
+
+// ─── Poll job status ──────────────────────────────────────────────
+function pollStatus(){
+  if(!currentJob) return;
+  pollTimer = setTimeout(async()=>{
+    try{
+      const r = await fetch('/api/status/'+currentJob);
+      const d = await r.json();
+      if(d.error){ showDlError(d.error); return; }
+
+      const pct = d.progress||0;
+      document.getElementById('prog-bar').style.width = pct+'%';
+      document.getElementById('prog-pct').textContent = pct.toFixed(0)+'%';
+      document.getElementById('prog-speed').textContent = d.speed||'';
+      document.getElementById('prog-eta').textContent   = d.eta ? 'ETA '+d.eta : '';
+
+      const statusMap = {
+        queued:'⏳ Queued…', downloading:'⬇️ Downloading…',
+        processing:'⚙️ Processing…', done:'✅ Done!', error:'❌ Error'
+      };
+      document.getElementById('status-text').textContent = statusMap[d.status]||d.status;
+
+      if(d.status==='done'){
+        document.getElementById('btn-start').disabled      = false;
+        document.getElementById('btn-save').style.display  = 'inline-block';
+        document.getElementById('dl-filename').textContent = '📁 '+d.filename;
+      } else if(d.status==='error'){
+        showDlError(d.error||'Unknown error');
+      } else {
+        pollStatus();
+      }
+    }catch(e){ pollStatus(); }
+  }, 800);
+}
+
+// ─── Save file ────────────────────────────────────────────────────
+function saveFile(){
+  if(!currentJob) return;
+  window.location.href = '/api/file/'+currentJob;
+}
+
+// ─── Search ───────────────────────────────────────────────────────
+async function doSearch(){
+  const q = document.getElementById('search-q').value.trim();
+  if(!q) return;
+  const count = document.getElementById('search-count').value;
+  const res   = document.getElementById('search-results');
+  res.innerHTML = '<div class="card" style="text-align:center"><span class="spinner"></span> Searching…</div>';
+  try{
+    const r  = await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,count:parseInt(count)})});
+    const d  = await r.json();
+    if(d.error){ res.innerHTML=`<div class="alert alert-err">${esc(d.error)}</div>`; return; }
+    res.innerHTML = d.results.map(v=>`
+      <div class="search-item" onclick="useSearchResult('${esc(v.url)}')">
+        <img class="search-thumb" src="${v.thumbnail}" onerror="this.style.display='none'"/>
+        <div class="search-meta">
+          <h4>${esc(v.title)}</h4>
+          <p>👤 ${esc(v.channel)} &nbsp;·&nbsp; ⏱ ${v.duration}</p>
+        </div>
+        <button class="search-use">Use →</button>
+      </div>`).join('');
+  }catch(e){ res.innerHTML=`<div class="alert alert-err">Error: ${e.message}</div>`; }
+}
+
+function useSearchResult(url){
+  document.getElementById('main-url').value = url;
+  switchTab('download');
+  document.querySelectorAll('.tabs .tab')[0].classList.add('active');
+  document.querySelectorAll('.tabs .tab')[1].classList.remove('active');
+  document.querySelectorAll('.tabs .tab')[2].classList.remove('active');
+  fetchInfo();
+}
+
+// ─── Formats ──────────────────────────────────────────────────────
+async function fetchFormats(){
+  const url = document.getElementById('fmt-url').value.trim();
+  if(!url) return;
+  const out = document.getElementById('formats-result');
+  out.innerHTML = '<div class="card" style="text-align:center"><span class="spinner"></span> Loading formats…</div>';
+  try{
+    const r = await fetch('/api/formats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    const d = await r.json();
+    if(d.error){ out.innerHTML=`<div class="alert alert-err">${esc(d.error)}</div>`; return; }
+    const rows = d.formats.map(f=>`
+      <tr>
+        <td>${f.id}</td><td>${f.ext}</td><td>${f.res}</td><td>${f.fps}</td>
+        <td>${f.size}</td><td>${f.vcodec.split('.')[0]}</td><td>${f.note}</td>
+      </tr>`).join('');
+    out.innerHTML = `<div class="card"><div class="formats-wrap"><table>
+      <thead><tr><th>ID</th><th>EXT</th><th>Resolution</th><th>FPS</th><th>Size</th><th>Codec</th><th>Note</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
+  }catch(e){ out.innerHTML=`<div class="alert alert-err">Error: ${e.message}</div>`; }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────
+function showAlert(id, msg, type){
+  document.getElementById(id).innerHTML = `<div class="alert alert-${type==='err'?'err':'ok'}" style="margin-top:.75rem">${msg}</div>`;
+}
+function showDlError(msg){
+  document.getElementById('dl-error').textContent = '❌ '+msg;
+  document.getElementById('dl-error').style.display = 'block';
+  document.getElementById('btn-start').disabled = false;
+  document.getElementById('status-text').textContent = 'Error';
+}
+function resetProgress(){
+  if(pollTimer) clearTimeout(pollTimer);
+  currentJob = null;
+  document.getElementById('prog-bar').style.width    = '0%';
+  document.getElementById('prog-pct').textContent    = '0%';
+  document.getElementById('prog-speed').textContent  = '';
+  document.getElementById('prog-eta').textContent    = '';
+  document.getElementById('status-text').textContent = '';
+  document.getElementById('dl-progress').style.display = 'none';
+  document.getElementById('btn-save').style.display    = 'none';
+  document.getElementById('dl-filename').textContent   = '';
+  document.getElementById('dl-error').style.display    = 'none';
+  document.getElementById('btn-start').disabled         = false;
+}
+function esc(s){ const d=document.createElement('div');d.textContent=String(s||'');return d.innerHTML; }
+</script>
+</body>
+</html>
