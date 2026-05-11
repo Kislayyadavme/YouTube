@@ -7,7 +7,6 @@ app = Flask(__name__)
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/tmp/ytdl_downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# ── Your Cloudflare Worker URL ────────────────────────────────────
 WORKER_URL = "https://alpha.kislayyadav02.workers.dev"
 
 jobs = {}
@@ -20,75 +19,95 @@ def worker_get(path, params={}):
     except Exception as e:
         return {"error": str(e)}
 
+# ── Download job ──────────────────────────────────────────────────
 def run_download(job_id, stream_url, audio_url, filename, video_only):
-    job_dir = os.path.join(DOWNLOAD_DIR, job_id)
+    job_dir  = os.path.join(DOWNLOAD_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
     filepath = os.path.join(job_dir, filename)
 
-    with jobs_lock:
-        jobs[job_id]["status"] = "downloading"
+    HEADERS = {
+        "User-Agent"     : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer"        : "https://www.youtube.com/",
+        "Accept-Encoding": "identity",
+        "Accept"         : "*/*",
+    }
 
     try:
         if video_only and audio_url:
-            # Download video + audio separately then merge with ffmpeg
-            v_path = filepath + ".video.tmp"
-            a_path = filepath + ".audio.tmp"
+            # Download video part
+            v_path = filepath + ".vtmp"
+            a_path = filepath + ".atmp"
 
-            for url, path, label in [(stream_url, v_path, "video"), (audio_url, a_path, "audio")]:
-                with jobs_lock:
-                    jobs[job_id]["status"] = f"downloading {label}"
-                with requests.get(url, stream=True, timeout=60,
-                    headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.youtube.com/"}) as r:
-                    r.raise_for_status()
-                    total = int(r.headers.get("content-length", 0))
-                    downloaded = 0
-                    with open(path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=1024*1024):
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                if total:
-                                    with jobs_lock:
-                                        jobs[job_id]["progress"] = round((downloaded/total)*50 if label=="video" else 50+round((downloaded/total)*45), 1)
-
-            # Merge with ffmpeg
             with jobs_lock:
-                jobs[job_id]["status"] = "processing"
-                jobs[job_id]["progress"] = 95
+                jobs[job_id]["status"] = "downloading video"
+
+            _stream_to_file(stream_url, v_path, HEADERS, job_id, 0, 50)
+
+            with jobs_lock:
+                jobs[job_id]["status"] = "downloading audio"
+
+            _stream_to_file(audio_url, a_path, HEADERS, job_id, 50, 95)
+
+            with jobs_lock:
+                jobs[job_id]["status"]   = "merging"
+                jobs[job_id]["progress"] = 96
+
             ret = os.system(f'ffmpeg -y -i "{v_path}" -i "{a_path}" -c copy "{filepath}" -loglevel quiet')
-            os.remove(v_path)
-            os.remove(a_path)
+            try:
+                os.remove(v_path)
+                os.remove(a_path)
+            except:
+                pass
+
             if ret != 0:
-                raise Exception("ffmpeg merge failed")
+                raise Exception("ffmpeg merge failed. Is ffmpeg installed on Render?")
 
         else:
-            # Direct stream download
-            with requests.get(stream_url, stream=True, timeout=60,
-                headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.youtube.com/"}) as r:
-                r.raise_for_status()
-                total = int(r.headers.get("content-length", 0))
-                downloaded = 0
-                with open(filepath, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024*1024):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if total:
-                                with jobs_lock:
-                                    jobs[job_id]["progress"] = round((downloaded/total)*99, 1)
+            with jobs_lock:
+                jobs[job_id]["status"] = "downloading"
+
+            _stream_to_file(stream_url, filepath, HEADERS, job_id, 0, 99)
+
+        # Find final file
+        files = [f for f in os.listdir(job_dir) if os.path.isfile(os.path.join(job_dir, f))]
+        if not files:
+            raise Exception("No output file found after download.")
+        files.sort(key=lambda f: os.path.getmtime(os.path.join(job_dir, f)), reverse=True)
 
         with jobs_lock:
             jobs[job_id].update({
                 "status"  : "done",
                 "progress": 100,
-                "filename": filename,
-                "filepath": filepath,
+                "filename": files[0],
+                "filepath": os.path.join(job_dir, files[0]),
             })
 
     except Exception as e:
         with jobs_lock:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"]  = str(e)
+
+def _stream_to_file(url, path, headers, job_id, prog_start, prog_end):
+    with requests.get(url, stream=True, timeout=120, headers=headers) as r:
+        r.raise_for_status()
+        total      = int(r.headers.get("content-length", 0))
+        downloaded = 0
+        with open(path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=512 * 1024):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        pct = prog_start + (downloaded / total) * (prog_end - prog_start)
+                        with jobs_lock:
+                            jobs[job_id]["progress"] = round(pct, 1)
+                            jobs[job_id]["downloaded"] = _fmt_size(downloaded)
+                            jobs[job_id]["total"]      = _fmt_size(total)
+
+def _fmt_size(b):
+    if b > 1073741824: return f"{b/1073741824:.2f} GB"
+    if b > 1048576:    return f"{b/1048576:.1f} MB"
+    return f"{b/1024:.0f} KB"
 
 # ── Routes ────────────────────────────────────────────────────────
 @app.route("/")
@@ -100,7 +119,8 @@ def get_info():
     url = request.json.get("url","").strip()
     if not url: return jsonify({"error":"No URL"}), 400
     data = worker_get("/info", {"url": url})
-    if data.get("error"): return jsonify({"error": data["error"]}), 400
+    if not data.get("success"):
+        return jsonify({"error": data.get("error","Failed")}), 400
     return jsonify(data)
 
 @app.route("/api/formats", methods=["POST"])
@@ -108,8 +128,8 @@ def get_formats():
     url = request.json.get("url","").strip()
     if not url: return jsonify({"error":"No URL"}), 400
     data = worker_get("/formats", {"url": url})
-    if data.get("error"): return jsonify({"error": data["error"]}), 400
-    # Flatten for table display
+    if not data.get("success"):
+        return jsonify({"error": data.get("error","Failed")}), 400
     fmts = []
     for v in data.get("formats",{}).get("video",[]):
         fmts.append({**v, "type":"video"})
@@ -123,48 +143,45 @@ def search():
     count = request.json.get("count", 6)
     if not query: return jsonify({"error":"No query"}), 400
     data = worker_get("/search", {"q": query, "limit": count})
-    if data.get("error"): return jsonify({"error": data["error"]}), 400
+    if not data.get("success"):
+        return jsonify({"error": data.get("error","Search failed")}), 400
     return jsonify({"results": data.get("results", [])})
 
 @app.route("/api/download", methods=["POST"])
 def start_download():
-    body      = request.json
-    url       = body.get("url","").strip()
-    mode      = body.get("mode","video")
-    quality   = body.get("quality","720p")
-    audio_fmt = body.get("audio_fmt","mp3")
+    body    = request.json
+    url     = body.get("url","").strip()
+    mode    = body.get("mode","video")
+    quality = body.get("quality","720p")
 
     if not url: return jsonify({"error":"No URL"}), 400
 
-    # Get stream info from Worker
+    # Get stream URLs from Worker
     if mode == "audio":
         data = worker_get("/audio", {"url": url})
     else:
         data = worker_get("/download", {"url": url, "quality": quality, "type": "video"})
 
     if not data.get("success"):
-        return jsonify({"error": data.get("error","Failed to get stream info")}), 400
+        return jsonify({"error": data.get("error","Could not get stream")}), 400
 
     stream_url = data.get("stream_url") or data.get("download_url")
     audio_url  = data.get("audio_url")
     video_only = data.get("video_only", False)
-    filename   = data.get("filename", f"video_{uuid.uuid4().hex[:8]}.mp4")
-
-    # Clean filename
-    filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+    filename   = re.sub(r'[\\/*?:"<>|]', "_", data.get("filename","video.mp4"))
 
     if not stream_url:
-        return jsonify({"error":"No stream URL returned"}), 400
+        return jsonify({"error":"No stream URL in response"}), 400
 
     job_id = str(uuid.uuid4())
     with jobs_lock:
         jobs[job_id] = {
-            "status"  : "queued",
-            "progress": 0,
-            "speed"   : "",
-            "eta"     : "",
-            "filename": filename,
-            "error"   : "",
+            "status"    : "queued",
+            "progress"  : 0,
+            "filename"  : filename,
+            "downloaded": "0 KB",
+            "total"     : "?",
+            "error"     : "",
         }
 
     threading.Thread(
@@ -173,7 +190,7 @@ def start_download():
         daemon=True,
     ).start()
 
-    return jsonify({"job_id": job_id})
+    return jsonify({"job_id": job_id, "filename": filename})
 
 @app.route("/api/status/<job_id>")
 def job_status(job_id):
@@ -190,12 +207,12 @@ def serve_file(job_id):
         return jsonify({"error":"Not ready"}), 400
     fp = job.get("filepath","")
     if not fp or not os.path.exists(fp):
-        return jsonify({"error":"File not found"}), 404
+        return jsonify({"error":"File missing on server"}), 404
     return send_file(fp, as_attachment=True, download_name=job["filename"])
 
 @app.route("/health")
 def health():
-    return jsonify({"status":"ok","time":datetime.utcnow().isoformat()})
+    return jsonify({"status":"ok","worker":WORKER_URL,"time":datetime.utcnow().isoformat()})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
