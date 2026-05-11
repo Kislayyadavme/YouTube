@@ -22,44 +22,45 @@ def base_cmd():
         "--geo-bypass",
         "--retries", "10",
         "--fragment-retries", "10",
-        "--concurrent-fragments", "4",
         "--no-warnings",
         "--extractor-args", "youtube:player_client=ios,android,web",
-        "--user-agent", "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;) gzip",
     ]
     return cmd
 
-# ── Get info ──────────────────────────────────────────────────────
 def ytdlp_info(url):
     cmd = base_cmd() + ["--dump-json", "--no-playlist", url]
-    r   = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise Exception(r.stderr.strip() or r.stdout.strip())
     return json.loads(r.stdout.strip().split("\n")[0])
 
-# ── Get formats ───────────────────────────────────────────────────
 def ytdlp_formats(url):
     cmd = base_cmd() + ["--dump-json", "--no-playlist", url]
-    r   = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise Exception(r.stderr.strip() or r.stdout.strip())
     info = json.loads(r.stdout.strip().split("\n")[0])
     fmts = []
     for f in info.get("formats", []):
         fmts.append({
-            "id"       : str(f.get("format_id","?")),
-            "ext"      : f.get("ext","?"),
-            "quality"  : f.get("format_note") or f.get("quality","?"),
-            "res"      : f.get("resolution") or f"{f.get('width','?')}x{f.get('height','?')}",
-            "fps"      : str(f.get("fps","?")),
-            "vcodec"   : f.get("vcodec","?"),
-            "acodec"   : f.get("acodec","?"),
-            "size"     : _fmt_size(f.get("filesize") or f.get("filesize_approx") or 0),
-            "type"     : "video" if f.get("vcodec","none") != "none" else "audio",
+            "id"     : str(f.get("format_id","?")),
+            "ext"    : f.get("ext","?"),
+            "quality": f.get("format_note") or f.get("quality","?"),
+            "res"    : f.get("resolution") or f"{f.get('width','?')}x{f.get('height','?')}",
+            "fps"    : str(f.get("fps","?")),
+            "size"   : _fmt_size(f.get("filesize") or f.get("filesize_approx") or 0),
+            "type"   : "video" if f.get("vcodec","none") != "none" else "audio",
+            "vcodec" : f.get("vcodec","?"),
+            "acodec" : f.get("acodec","?"),
         })
-    return fmts, info
+    return fmts
 
-# ── Download job ──────────────────────────────────────────────────
+def _fmt_size(b):
+    if not b: return "N/A"
+    if b > 1e9: return f"{b/1e9:.2f} GB"
+    if b > 1e6: return f"{b/1e6:.1f} MB"
+    return f"{b/1024:.0f} KB"
+
 def run_download(job_id, url, mode, quality, audio_fmt):
     job_dir = os.path.join(DOWNLOAD_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -82,47 +83,53 @@ def run_download(job_id, url, mode, quality, audio_fmt):
                 "--audio-quality", "0",
             ]
         else:
-            # Quality format selector — works with cookies
+            # KEY FIX: use simple fallback format that always works
             qmap = {
-                "4k"   : "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best",
-                "2k"   : "bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best",
-                "1080p": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best",
-                "720p" : "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best",
-                "480p" : "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best",
-                "360p" : "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/best",
-                "144p" : "bestvideo[height<=144][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=144]+bestaudio/best",
-                "best" : "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+                "4k"   : "bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best",
+                "2k"   : "bestvideo[height<=1440]+bestaudio/bestvideo+bestaudio/best",
+                "1080p": "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
+                "720p" : "bestvideo[height<=720]+bestaudio/bestvideo+bestaudio/best",
+                "480p" : "bestvideo[height<=480]+bestaudio/bestvideo+bestaudio/best",
+                "360p" : "bestvideo[height<=360]+bestaudio/bestvideo+bestaudio/best",
+                "144p" : "bestvideo[height<=144]+bestaudio/bestvideo+bestaudio/best",
+                "best" : "bestvideo+bestaudio/best",
             }
-            fmt = qmap.get(quality, qmap["720p"])
-            cmd += ["-f", fmt, "--merge-output-format", "mp4"]
+            fmt = qmap.get(quality, "bestvideo+bestaudio/best")
+            cmd += [
+                "-f", fmt,
+                "--merge-output-format", "mp4",
+            ]
 
         cmd.append(url)
 
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
 
         for line in proc.stdout:
             line = line.strip()
             if not line: continue
-
-            # Progress line: [download]  45.3% of 23.45MiB at 1.23MiB/s ETA 00:10
             if "[download]" in line and "%" in line:
                 try:
-                    pct  = float(re.search(r'(\d+\.?\d*)%', line).group(1))
-                    spd  = re.search(r'at\s+(\S+/s)', line)
-                    eta  = re.search(r'ETA\s+(\S+)', line)
-                    size = re.search(r'of\s+~?(\S+)', line)
+                    pct = float(re.search(r'(\d+\.?\d*)%', line).group(1))
+                    spd = re.search(r'at\s+(\S+/s)', line)
+                    eta = re.search(r'ETA\s+(\S+)', line)
+                    siz = re.search(r'of\s+~?(\S+)', line)
                     with jobs_lock:
                         jobs[job_id]["progress"] = round(pct, 1)
                         jobs[job_id]["status"]   = "downloading"
-                        if spd:  jobs[job_id]["speed"] = spd.group(1)
-                        if eta:  jobs[job_id]["eta"]   = eta.group(1)
-                        if size: jobs[job_id]["total"] = size.group(1)
+                        if spd: jobs[job_id]["speed"] = spd.group(1)
+                        if eta: jobs[job_id]["eta"]   = eta.group(1)
+                        if siz: jobs[job_id]["total"] = siz.group(1)
                 except: pass
             elif "[Merger]" in line or "Merging" in line:
                 with jobs_lock:
                     jobs[job_id]["status"]   = "merging"
                     jobs[job_id]["progress"] = 98
-            elif "[ExtractAudio]" in line or "Destination" in line and "audio" in line.lower():
+            elif "[ExtractAudio]" in line:
                 with jobs_lock:
                     jobs[job_id]["status"]   = "converting"
                     jobs[job_id]["progress"] = 98
@@ -130,17 +137,15 @@ def run_download(job_id, url, mode, quality, audio_fmt):
         proc.wait()
 
         if proc.returncode != 0:
-            raise Exception("yt-dlp failed. Check cookies or try different quality.")
+            raise Exception("Download failed. Please re-export and upload cookies.txt")
 
-        # Find the output file
         files = [
             f for f in os.listdir(job_dir)
             if os.path.isfile(os.path.join(job_dir, f))
             and not f.endswith((".part", ".ytdl", ".tmp"))
         ]
         if not files:
-            raise Exception("Download finished but no file found.")
-
+            raise Exception("No file found after download.")
         files.sort(key=lambda f: os.path.getmtime(os.path.join(job_dir, f)), reverse=True)
 
         with jobs_lock:
@@ -158,15 +163,6 @@ def run_download(job_id, url, mode, quality, audio_fmt):
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"]  = str(e)
 
-def _fmt_size(b):
-    if not b: return "N/A"
-    if b > 1e9: return f"{b/1e9:.2f} GB"
-    if b > 1e6: return f"{b/1e6:.1f} MB"
-    return f"{b/1024:.0f} KB"
-
-# ════════════════════════════════════════════════════════════════
-#  Routes
-# ════════════════════════════════════════════════════════════════
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -177,7 +173,7 @@ def get_info():
     if not url: return jsonify({"error":"No URL"}), 400
     try:
         info = ytdlp_info(url)
-        d    = int(info.get("duration") or 0)
+        d = int(info.get("duration") or 0)
         return jsonify({
             "success"    : True,
             "title"      : info.get("title","Unknown"),
@@ -188,7 +184,7 @@ def get_info():
             "likes"      : int(info.get("like_count") or 0),
             "upload_date": info.get("upload_date",""),
             "is_live"    : bool(info.get("is_live", False)),
-            "source"     : "yt-dlp" + (" + cookies ✅" if has_cookies() else " ⚠️ no cookies"),
+            "source"     : "yt-dlp + cookies ✅" if has_cookies() else "yt-dlp ⚠️ no cookies",
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -198,7 +194,7 @@ def get_formats():
     url = request.json.get("url","").strip()
     if not url: return jsonify({"error":"No URL"}), 400
     try:
-        fmts, _ = ytdlp_formats(url)
+        fmts = ytdlp_formats(url)
         return jsonify({"formats": fmts})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -210,8 +206,8 @@ def search():
     if not query: return jsonify({"error":"No query"}), 400
     try:
         cmd = base_cmd() + [
-            "--dump-json", "--flat-playlist", "--no-warnings",
-            f"ytsearch{count}:{query}"
+            "--dump-json", "--flat-playlist",
+            "--no-warnings", f"ytsearch{count}:{query}"
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         results = []
@@ -250,7 +246,6 @@ def start_download():
             "speed":"","eta":"","total":"",
             "filename":"","filepath":"","error":"",
         }
-
     threading.Thread(
         target=run_download,
         args=(job_id, url, mode, quality, audio_fmt),
@@ -273,15 +268,14 @@ def serve_file(job_id):
         return jsonify({"error":"Not ready"}), 400
     fp = job.get("filepath","")
     if not fp or not os.path.exists(fp):
-        return jsonify({"error":"File missing on server"}), 404
+        return jsonify({"error":"File missing"}), 404
     return send_file(fp, as_attachment=True, download_name=job["filename"])
 
 @app.route("/api/cookies-status")
 def cookies_status():
     return jsonify({
         "has_cookies": has_cookies(),
-        "path"       : COOKIES_FILE,
-        "message"    : "✅ Cookies active" if has_cookies() else "❌ No cookies",
+        "message": "✅ Cookies active" if has_cookies() else "❌ No cookies found on server",
     })
 
 @app.route("/health")
@@ -289,6 +283,7 @@ def health():
     return jsonify({
         "status" : "ok",
         "cookies": has_cookies(),
+        "cookies_path": COOKIES_FILE,
         "time"   : datetime.utcnow().isoformat(),
     })
 
