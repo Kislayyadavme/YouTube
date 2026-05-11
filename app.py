@@ -1,75 +1,113 @@
-import os, re, uuid, threading, requests
+import os, re, uuid, threading, requests, subprocess
 from flask import Flask, render_template, request, jsonify, send_file
 from datetime import datetime
 
 app = Flask(__name__)
 
-DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/tmp/ytdl_downloads")
+DOWNLOAD_DIR  = os.environ.get("DOWNLOAD_DIR", "/tmp/ytdl_downloads")
+COOKIES_FILE  = os.path.join(os.path.dirname(__file__), "cookies.txt")
+WORKER_URL    = "https://alpha.kislayyadav02.workers.dev"
+
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-WORKER_URL = "https://alpha.kislayyadav02.workers.dev"
-
-jobs = {}
+jobs      = {}
 jobs_lock = threading.Lock()
 
-def worker_get(path, params={}):
-    try:
-        r = requests.get(f"{WORKER_URL}{path}", params=params, timeout=30)
-        return r.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-# ── Download job ──────────────────────────────────────────────────
-def run_download(job_id, stream_url, audio_url, filename, video_only):
+# ── Use yt-dlp with cookies directly (most reliable) ─────────────
+def run_ytdlp(job_id, url, mode, quality, audio_fmt):
     job_dir  = os.path.join(DOWNLOAD_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
-    filepath = os.path.join(job_dir, filename)
 
-    HEADERS = {
-        "User-Agent"     : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer"        : "https://www.youtube.com/",
-        "Accept-Encoding": "identity",
-        "Accept"         : "*/*",
-    }
+    with jobs_lock:
+        jobs[job_id]["status"] = "downloading"
 
     try:
-        if video_only and audio_url:
-            # Download video part
-            v_path = filepath + ".vtmp"
-            a_path = filepath + ".atmp"
+        # Build yt-dlp command
+        cmd = ["yt-dlp", "--no-playlist", "-o", f"{job_dir}/%(title)s.%(ext)s"]
 
-            with jobs_lock:
-                jobs[job_id]["status"] = "downloading video"
+        # Add cookies if file exists
+        if os.path.exists(COOKIES_FILE):
+            cmd += ["--cookies", COOKIES_FILE]
 
-            _stream_to_file(stream_url, v_path, HEADERS, job_id, 0, 50)
-
-            with jobs_lock:
-                jobs[job_id]["status"] = "downloading audio"
-
-            _stream_to_file(audio_url, a_path, HEADERS, job_id, 50, 95)
-
-            with jobs_lock:
-                jobs[job_id]["status"]   = "merging"
-                jobs[job_id]["progress"] = 96
-
-            ret = os.system(f'ffmpeg -y -i "{v_path}" -i "{a_path}" -c copy "{filepath}" -loglevel quiet')
-            try:
-                os.remove(v_path)
-                os.remove(a_path)
-            except:
-                pass
-
-            if ret != 0:
-                raise Exception("ffmpeg merge failed. Is ffmpeg installed on Render?")
-
+        # Add format
+        if mode == "audio":
+            cmd += [
+                "-f", "bestaudio/best",
+                "-x", "--audio-format", audio_fmt or "mp3",
+                "--audio-quality", "0",
+            ]
         else:
-            with jobs_lock:
-                jobs[job_id]["status"] = "downloading"
+            qmap = {
+                "4k"   :"bestvideo[height<=2160]+bestaudio/best",
+                "2k"   :"bestvideo[height<=1440]+bestaudio/best",
+                "1080p":"bestvideo[height<=1080]+bestaudio/best",
+                "720p" :"bestvideo[height<=720]+bestaudio/best",
+                "480p" :"bestvideo[height<=480]+bestaudio/best",
+                "360p" :"bestvideo[height<=360]+bestaudio/best",
+                "144p" :"bestvideo[height<=144]+bestaudio/best",
+                "best" :"bestvideo+bestaudio/best",
+            }
+            fmt = qmap.get(quality, qmap["720p"])
+            cmd += ["-f", fmt, "--merge-output-format", "mp4"]
 
-            _stream_to_file(stream_url, filepath, HEADERS, job_id, 0, 99)
+        # Extra reliability options
+        cmd += [
+            "--retries", "5",
+            "--fragment-retries", "5",
+            "--concurrent-fragments", "4",
+            "--no-warnings",
+            "--geo-bypass",
+            "--extractor-args", "youtube:player_client=ios,android,tv_embedded",
+            url
+        ]
 
-        # Find final file
-        files = [f for f in os.listdir(job_dir) if os.path.isfile(os.path.join(job_dir, f))]
+        # Run yt-dlp
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        output_lines = []
+        for line in proc.stdout:
+            line = line.strip()
+            output_lines.append(line)
+            # Parse progress
+            if "[download]" in line and "%" in line:
+                try:
+                    pct = float(re.search(r'(\d+\.?\d*)%', line).group(1))
+                    with jobs_lock:
+                        jobs[job_id]["progress"] = pct
+                        # Parse speed and size
+                        spd = re.search(r'at\s+(\S+)', line)
+                        eta = re.search(r'ETA\s+(\S+)', line)
+                        siz = re.search(r'of\s+(\S+)', line)
+                        if spd: jobs[job_id]["speed"] = spd.group(1)
+                        if eta: jobs[job_id]["eta"]   = eta.group(1)
+                        if siz: jobs[job_id]["total"] = siz.group(1)
+                except: pass
+            elif "[Merger]" in line or "Merging" in line:
+                with jobs_lock:
+                    jobs[job_id]["status"]   = "merging"
+                    jobs[job_id]["progress"] = 98
+            elif "[ExtractAudio]" in line:
+                with jobs_lock:
+                    jobs[job_id]["status"]   = "converting"
+                    jobs[job_id]["progress"] = 98
+
+        proc.wait()
+
+        if proc.returncode != 0:
+            full_output = "\n".join(output_lines[-10:])
+            raise Exception(f"yt-dlp failed: {full_output}")
+
+        # Find downloaded file
+        files = [
+            f for f in os.listdir(job_dir)
+            if os.path.isfile(os.path.join(job_dir, f))
+            and not f.endswith(('.part', '.ytdl', '.tmp'))
+        ]
         if not files:
             raise Exception("No output file found after download.")
         files.sort(key=lambda f: os.path.getmtime(os.path.join(job_dir, f)), reverse=True)
@@ -87,26 +125,16 @@ def run_download(job_id, stream_url, audio_url, filename, video_only):
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"]  = str(e)
 
-def _stream_to_file(url, path, headers, job_id, prog_start, prog_end):
-    with requests.get(url, stream=True, timeout=120, headers=headers) as r:
-        r.raise_for_status()
-        total      = int(r.headers.get("content-length", 0))
-        downloaded = 0
-        with open(path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=512 * 1024):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total:
-                        pct = prog_start + (downloaded / total) * (prog_end - prog_start)
-                        with jobs_lock:
-                            jobs[job_id]["progress"] = round(pct, 1)
-                            jobs[job_id]["downloaded"] = _fmt_size(downloaded)
-                            jobs[job_id]["total"]      = _fmt_size(total)
+def worker_get(path, params={}):
+    try:
+        r = requests.get(f"{WORKER_URL}{path}", params=params, timeout=20)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
 
-def _fmt_size(b):
-    if b > 1073741824: return f"{b/1073741824:.2f} GB"
-    if b > 1048576:    return f"{b/1048576:.1f} MB"
+def fmt_size(b):
+    if b>1e9: return f"{b/1e9:.2f} GB"
+    if b>1e6: return f"{b/1e6:.1f} MB"
     return f"{b/1024:.0f} KB"
 
 # ── Routes ────────────────────────────────────────────────────────
@@ -118,24 +146,31 @@ def index():
 def get_info():
     url = request.json.get("url","").strip()
     if not url: return jsonify({"error":"No URL"}), 400
+    # Try Worker first (fast, no download needed)
     data = worker_get("/info", {"url": url})
-    if not data.get("success"):
-        return jsonify({"error": data.get("error","Failed")}), 400
-    return jsonify(data)
-
-@app.route("/api/formats", methods=["POST"])
-def get_formats():
-    url = request.json.get("url","").strip()
-    if not url: return jsonify({"error":"No URL"}), 400
-    data = worker_get("/formats", {"url": url})
-    if not data.get("success"):
-        return jsonify({"error": data.get("error","Failed")}), 400
-    fmts = []
-    for v in data.get("formats",{}).get("video",[]):
-        fmts.append({**v, "type":"video"})
-    for a in data.get("formats",{}).get("audio",[]):
-        fmts.append({**a, "type":"audio"})
-    return jsonify({"formats": fmts})
+    if data.get("success"):
+        return jsonify(data)
+    # Fallback: use yt-dlp locally
+    try:
+        import yt_dlp
+        opts = {"quiet":True,"no_warnings":True}
+        if os.path.exists(COOKIES_FILE):
+            opts["cookiefile"] = COOKIES_FILE
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        d = int(info.get("duration",0))
+        return jsonify({
+            "success"    : True,
+            "title"      : info.get("title","Unknown"),
+            "channel"    : info.get("uploader","Unknown"),
+            "thumbnail"  : info.get("thumbnail",""),
+            "duration"   : f"{d//3600:02d}:{(d%3600)//60:02d}:{d%60:02d}",
+            "views"      : info.get("view_count",0),
+            "is_live"    : info.get("is_live",False),
+            "source"     : "yt-dlp+cookies",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route("/api/search", methods=["POST"])
 def search():
@@ -143,54 +178,46 @@ def search():
     count = request.json.get("count", 6)
     if not query: return jsonify({"error":"No query"}), 400
     data = worker_get("/search", {"q": query, "limit": count})
-    if not data.get("success"):
-        return jsonify({"error": data.get("error","Search failed")}), 400
-    return jsonify({"results": data.get("results", [])})
+    if data.get("success"):
+        return jsonify({"results": data.get("results",[])})
+    return jsonify({"error": data.get("error","Search failed")}), 400
+
+@app.route("/api/formats", methods=["POST"])
+def get_formats():
+    url = request.json.get("url","").strip()
+    if not url: return jsonify({"error":"No URL"}), 400
+    data = worker_get("/formats", {"url": url})
+    if data.get("success"):
+        fmts = []
+        for v in data.get("formats",{}).get("video",[]): fmts.append({**v,"type":"video"})
+        for a in data.get("formats",{}).get("audio",[]): fmts.append({**a,"type":"audio"})
+        return jsonify({"formats": fmts})
+    return jsonify({"error": data.get("error","Failed")}), 400
 
 @app.route("/api/download", methods=["POST"])
 def start_download():
-    body    = request.json
-    url     = body.get("url","").strip()
-    mode    = body.get("mode","video")
-    quality = body.get("quality","720p")
-
+    body      = request.json
+    url       = body.get("url","").strip()
+    mode      = body.get("mode","video")
+    quality   = body.get("quality","720p")
+    audio_fmt = body.get("audio_fmt","mp3")
     if not url: return jsonify({"error":"No URL"}), 400
-
-    # Get stream URLs from Worker
-    if mode == "audio":
-        data = worker_get("/audio", {"url": url})
-    else:
-        data = worker_get("/download", {"url": url, "quality": quality, "type": "video"})
-
-    if not data.get("success"):
-        return jsonify({"error": data.get("error","Could not get stream")}), 400
-
-    stream_url = data.get("stream_url") or data.get("download_url")
-    audio_url  = data.get("audio_url")
-    video_only = data.get("video_only", False)
-    filename   = re.sub(r'[\\/*?:"<>|]', "_", data.get("filename","video.mp4"))
-
-    if not stream_url:
-        return jsonify({"error":"No stream URL in response"}), 400
 
     job_id = str(uuid.uuid4())
     with jobs_lock:
         jobs[job_id] = {
-            "status"    : "queued",
-            "progress"  : 0,
-            "filename"  : filename,
-            "downloaded": "0 KB",
-            "total"     : "?",
-            "error"     : "",
+            "status":"queued","progress":0,
+            "speed":"","eta":"","total":"",
+            "filename":"","filepath":"","error":"",
         }
 
     threading.Thread(
-        target=run_download,
-        args=(job_id, stream_url, audio_url, filename, video_only),
+        target=run_ytdlp,
+        args=(job_id, url, mode, quality, audio_fmt),
         daemon=True,
     ).start()
 
-    return jsonify({"job_id": job_id, "filename": filename})
+    return jsonify({"job_id": job_id})
 
 @app.route("/api/status/<job_id>")
 def job_status(job_id):
@@ -202,18 +229,25 @@ def job_status(job_id):
 @app.route("/api/file/<job_id>")
 def serve_file(job_id):
     with jobs_lock:
-        job = jobs.get(job_id, {})
+        job = jobs.get(job_id,{})
     if job.get("status") != "done":
         return jsonify({"error":"Not ready"}), 400
     fp = job.get("filepath","")
     if not fp or not os.path.exists(fp):
-        return jsonify({"error":"File missing on server"}), 404
+        return jsonify({"error":"File missing"}), 404
     return send_file(fp, as_attachment=True, download_name=job["filename"])
+
+@app.route("/api/cookies-status")
+def cookies_status():
+    exists = os.path.exists(COOKIES_FILE)
+    return jsonify({
+        "has_cookies": exists,
+        "message": "Cookies active ✅" if exists else "No cookies ❌ — bot errors may occur"
+    })
 
 @app.route("/health")
 def health():
-    return jsonify({"status":"ok","worker":WORKER_URL,"time":datetime.utcnow().isoformat()})
+    return jsonify({"status":"ok","cookies":os.path.exists(COOKIES_FILE),"time":datetime.utcnow().isoformat()})
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)))
