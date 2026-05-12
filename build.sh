@@ -1,12 +1,16 @@
 #!/bin/bash
-# Render build script — installs ffmpeg then Python deps
 set -e
-
-echo "==> Installing ffmpeg..."
+echo "==> Installing system dependencies..."
 apt-get update -qq && apt-get install -y -qq ffmpeg
 
 echo "==> Installing Python dependencies..."
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install flask gunicorn requests
+
+echo "==> Installing LATEST yt-dlp..."
+pip install --upgrade yt-dlp
+
+echo "==> yt-dlp version:"
+yt-dlp --version
 
 echo "==> Build complete ✅"

@@ -23,43 +23,35 @@ def base_cmd():
         "--retries", "10",
         "--fragment-retries", "10",
         "--no-warnings",
+        "--no-check-certificates",
         "--extractor-args", "youtube:player_client=ios,android,web",
     ]
     return cmd
 
-def ytdlp_info(url):
-    cmd = base_cmd() + ["--dump-json", "--no-playlist", url]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+def run_cmd(cmd, timeout=60):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    out = r.stdout.strip()
+    err = r.stderr.strip()
     if r.returncode != 0:
-        raise Exception(r.stderr.strip() or r.stdout.strip())
-    return json.loads(r.stdout.strip().split("\n")[0])
-
-def ytdlp_formats(url):
-    cmd = base_cmd() + ["--dump-json", "--no-playlist", url]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if r.returncode != 0:
-        raise Exception(r.stderr.strip() or r.stdout.strip())
-    info = json.loads(r.stdout.strip().split("\n")[0])
-    fmts = []
-    for f in info.get("formats", []):
-        fmts.append({
-            "id"     : str(f.get("format_id","?")),
-            "ext"    : f.get("ext","?"),
-            "quality": f.get("format_note") or f.get("quality","?"),
-            "res"    : f.get("resolution") or f"{f.get('width','?')}x{f.get('height','?')}",
-            "fps"    : str(f.get("fps","?")),
-            "size"   : _fmt_size(f.get("filesize") or f.get("filesize_approx") or 0),
-            "type"   : "video" if f.get("vcodec","none") != "none" else "audio",
-            "vcodec" : f.get("vcodec","?"),
-            "acodec" : f.get("acodec","?"),
-        })
-    return fmts
+        raise Exception(err or out)
+    return out
 
 def _fmt_size(b):
     if not b: return "N/A"
     if b > 1e9: return f"{b/1e9:.2f} GB"
     if b > 1e6: return f"{b/1e6:.1f} MB"
     return f"{b/1024:.0f} KB"
+
+def get_info_json(url):
+    # Use --skip-download with -J to get info without format check
+    cmd = base_cmd() + [
+        "-J",
+        "--skip-download",
+        "--no-playlist",
+        url
+    ]
+    out = run_cmd(cmd, timeout=60)
+    return json.loads(out)
 
 def run_download(job_id, url, mode, quality, audio_fmt):
     job_dir = os.path.join(DOWNLOAD_DIR, job_id)
@@ -73,6 +65,7 @@ def run_download(job_id, url, mode, quality, audio_fmt):
             "--no-playlist",
             "-o", f"{job_dir}/%(title)s.%(ext)s",
             "--newline",
+            "--no-check-certificates",
         ]
 
         if mode == "audio":
@@ -83,30 +76,24 @@ def run_download(job_id, url, mode, quality, audio_fmt):
                 "--audio-quality", "0",
             ]
         else:
-            # KEY FIX: use simple fallback format that always works
             qmap = {
-                "4k"   : "bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best",
-                "2k"   : "bestvideo[height<=1440]+bestaudio/bestvideo+bestaudio/best",
-                "1080p": "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
-                "720p" : "bestvideo[height<=720]+bestaudio/bestvideo+bestaudio/best",
-                "480p" : "bestvideo[height<=480]+bestaudio/bestvideo+bestaudio/best",
-                "360p" : "bestvideo[height<=360]+bestaudio/bestvideo+bestaudio/best",
-                "144p" : "bestvideo[height<=144]+bestaudio/bestvideo+bestaudio/best",
+                "4k"   : "bestvideo[height<=2160]+bestaudio/best",
+                "2k"   : "bestvideo[height<=1440]+bestaudio/best",
+                "1080p": "bestvideo[height<=1080]+bestaudio/best",
+                "720p" : "bestvideo[height<=720]+bestaudio/best",
+                "480p" : "bestvideo[height<=480]+bestaudio/best",
+                "360p" : "bestvideo[height<=360]+bestaudio/best",
+                "144p" : "bestvideo[height<=144]+bestaudio/best",
                 "best" : "bestvideo+bestaudio/best",
             }
             fmt = qmap.get(quality, "bestvideo+bestaudio/best")
-            cmd += [
-                "-f", fmt,
-                "--merge-output-format", "mp4",
-            ]
+            cmd += ["-f", fmt, "--merge-output-format", "mp4"]
 
         cmd.append(url)
 
         proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+            cmd, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True
         )
 
         for line in proc.stdout:
@@ -137,7 +124,7 @@ def run_download(job_id, url, mode, quality, audio_fmt):
         proc.wait()
 
         if proc.returncode != 0:
-            raise Exception("Download failed. Please re-export and upload cookies.txt")
+            raise Exception("Download failed. Try a different quality or re-upload cookies.")
 
         files = [
             f for f in os.listdir(job_dir)
@@ -172,7 +159,7 @@ def get_info():
     url = request.json.get("url","").strip()
     if not url: return jsonify({"error":"No URL"}), 400
     try:
-        info = ytdlp_info(url)
+        info = get_info_json(url)
         d = int(info.get("duration") or 0)
         return jsonify({
             "success"    : True,
@@ -194,7 +181,18 @@ def get_formats():
     url = request.json.get("url","").strip()
     if not url: return jsonify({"error":"No URL"}), 400
     try:
-        fmts = ytdlp_formats(url)
+        info = get_info_json(url)
+        fmts = []
+        for f in info.get("formats", []):
+            fmts.append({
+                "id"     : str(f.get("format_id","?")),
+                "ext"    : f.get("ext","?"),
+                "quality": f.get("format_note") or f.get("quality","?"),
+                "res"    : f.get("resolution") or f"{f.get('width','?')}x{f.get('height','?')}",
+                "fps"    : str(f.get("fps","?")),
+                "size"   : _fmt_size(f.get("filesize") or f.get("filesize_approx") or 0),
+                "type"   : "video" if f.get("vcodec","none") != "none" else "audio",
+            })
         return jsonify({"formats": fmts})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -206,12 +204,12 @@ def search():
     if not query: return jsonify({"error":"No query"}), 400
     try:
         cmd = base_cmd() + [
-            "--dump-json", "--flat-playlist",
+            "--flat-playlist", "--dump-json",
             "--no-warnings", f"ytsearch{count}:{query}"
         ]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        out = run_cmd(cmd, timeout=60)
         results = []
-        for line in r.stdout.strip().split("\n"):
+        for line in out.split("\n"):
             if not line.strip(): continue
             try:
                 v   = json.loads(line)
@@ -275,16 +273,22 @@ def serve_file(job_id):
 def cookies_status():
     return jsonify({
         "has_cookies": has_cookies(),
-        "message": "✅ Cookies active" if has_cookies() else "❌ No cookies found on server",
+        "message": "✅ Cookies active" if has_cookies() else "❌ No cookies",
     })
 
 @app.route("/health")
 def health():
+    # Also show yt-dlp version for debugging
+    try:
+        ver = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True).stdout.strip()
+    except:
+        ver = "unknown"
     return jsonify({
-        "status" : "ok",
-        "cookies": has_cookies(),
+        "status"      : "ok",
+        "cookies"     : has_cookies(),
         "cookies_path": COOKIES_FILE,
-        "time"   : datetime.utcnow().isoformat(),
+        "ytdlp_version": ver,
+        "time"        : datetime.utcnow().isoformat(),
     })
 
 if __name__ == "__main__":
